@@ -1,80 +1,104 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
+from typing import Optional
 
 
-class StableWeightedBCEWithLogits(nn.Module):
-    """Stable Weighted Binary Cross Entropy Loss with optional label smoothing.
+class StableWeightedBCEWithLogits(nn.modules.loss._WeightedLoss):
+    r"""Numerically stable binary cross-entropy loss with optional label smoothing
+    and positive-class weighting.
 
-    This loss combines a Sigmoid layer and the Binary Cross Entropy loss in one
-    single class, using the numerically stable log-sum-exp trick internally
-    (via :func:`torch.nn.functional.binary_cross_entropy_with_logits`).
+    Drop-in companion to :class:`~torch.nn.BCEWithLogitsLoss`, designed for:
 
-    Extends :class:`~torch.nn.BCEWithLogitsLoss` with:
-
-    * **pos_weight**: positive class weight to handle class imbalance.
-    * **label_smoothing**: prevents overconfidence by mixing target labels
-      toward 0.5, improving generalization on noisy or ambiguous datasets.
-
-    This loss is suitable for:
-
-    * Imbalanced binary classification (e.g., fraud detection, rare event modeling)
+    * Class-imbalanced binary classification (e.g., fraud, anomaly detection)
     * Multi-label classification
-    * Medical imaging and anomaly detection
+    * Medical imaging
+
+    The loss is computed as:
+
+    .. math::
+
+        \ell(x, y) = -\frac{1}{N} \sum_{i=1}^{N}
+            \Bigl[
+                w \cdot \tilde{y}_i \log \sigma(x_i)
+              + (1 - \tilde{y}_i) \log (1 - \sigma(x_i))
+            \Bigr]
+
+    where :math:`\tilde{y}_i = y_i (1 - \varepsilon) + 0.5\,\varepsilon` when
+    ``label_smoothing`` :math:`\varepsilon > 0`, otherwise :math:`\tilde{y}_i = y_i`,
+    and :math:`w` is ``pos_weight``.
+
+    Internally the log-sum-exp trick from
+    :func:`~torch.nn.functional.binary_cross_entropy_with_logits` is used, so the
+    computation is numerically safe even at large logit magnitudes.
 
     Args:
-        pos_weight (Tensor, optional): a weight of positive examples to be
-            broadcast with target. Must be a tensor with length equal to the
-            number of classes. Default: ``None``.
-        label_smoothing (float, optional): a value in [0.0, 1.0] that
-            specifies the amount of label smoothing when computing the loss.
-            A value of 0.0 means no smoothing (default). When > 0, target
-            values are shifted toward 0.5:
-            ``y_smooth = y * (1 - label_smoothing) + 0.5 * label_smoothing``.
-            Default: ``0.0``.
+        pos_weight (Tensor, optional): Scalar or per-class weight for the positive
+            class. Registered as a buffer so it moves with the module on
+            ``.to(device)`` / ``.cuda()`` calls. Default: ``None``.
+        label_smoothing (float): Amount of label smoothing in :math:`[0, 1)`.
+            ``0.0`` (default) means no smoothing.  Acts as the binary analogue of
+            ``CrossEntropyLoss(label_smoothing=…)``.
 
     Shape:
-        - Input: :math:`(*)` where :math:`*` means any number of dimensions.
-        - Target: :math:`(*)`, same shape as the input.
-        - Output: scalar by default.
+        - **Input** :math:`(*)` — raw (un-normalised) logits, any shape.
+        - **Target** :math:`(*)` — binary labels :math:`\in \{0, 1\}`, same shape.
+        - **Output** — scalar tensor.
 
     Examples::
 
-        >>> loss_fn = StableWeightedBCEWithLogits(label_smoothing=0.1)
-        >>> input = torch.randn(8, requires_grad=True)
-        >>> target = torch.randint(0, 2, (8,)).float()
-        >>> loss = loss_fn(input, target)
+        >>> import torch
+        >>> from torch.nn import StableWeightedBCEWithLogits
+
+        >>> # Basic usage
+        >>> loss_fn = StableWeightedBCEWithLogits()
+        >>> x = torch.randn(8, requires_grad=True)
+        >>> y = torch.randint(0, 2, (8,)).float()
+        >>> loss = loss_fn(x, y)
         >>> loss.backward()
 
-        >>> # Imbalanced dataset: weight positives 3x
-        >>> pos_weight = torch.tensor([3.0])
+        >>> # Label smoothing for noisy / ambiguous labels
+        >>> loss_fn = StableWeightedBCEWithLogits(label_smoothing=0.1)
+
+        >>> # 1:10 imbalanced dataset — weight positives 10x
+        >>> pos_weight = torch.tensor([10.0])
         >>> loss_fn = StableWeightedBCEWithLogits(pos_weight=pos_weight)
-        >>> loss = loss_fn(input, target)
+        >>> loss_fn.pos_weight.device  # moves with the module
+        device(type='cpu')
     """
+
+    __constants__ = ["label_smoothing"]
 
     def __init__(
         self,
-        pos_weight: torch.Tensor | None = None,
+        pos_weight: Optional[Tensor] = None,
         label_smoothing: float = 0.0,
     ) -> None:
-        super().__init__()
-        if not (0.0 <= label_smoothing <= 1.0):
+        super().__init__(weight=None, size_average=None, reduce=None, reduction="mean")
+        if not 0.0 <= label_smoothing < 1.0:
             raise ValueError(
-                f"label_smoothing must be in [0.0, 1.0], got {label_smoothing}"
+                f"label_smoothing must be in [0.0, 1.0), got {label_smoothing}"
             )
-        self.pos_weight = pos_weight
         self.label_smoothing = label_smoothing
+        self.register_buffer("pos_weight", pos_weight)
 
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def extra_repr(self) -> str:
+        parts = [f"label_smoothing={self.label_smoothing}"]
+        if self.pos_weight is not None:
+            parts.append(f"pos_weight={self.pos_weight.tolist()}")
+        return ", ".join(parts)
+
+    def forward(self, inputs: Tensor, targets: Tensor) -> Tensor:
         """Compute the stable weighted BCE loss.
 
         Args:
-            inputs (Tensor): Raw (unnormalized) logits of shape :math:`(N, *)`.
+            inputs (Tensor): Raw logits of shape :math:`(N, *)`.
             targets (Tensor): Binary labels of shape :math:`(N, *)`,
-                with values in {0, 1}.
+                values in :math:`\\{0, 1\\}`.
 
         Returns:
-            Tensor: Scalar loss value.
+            Tensor: Scalar loss.
         """
         targets = targets.float()
 
@@ -85,5 +109,5 @@ class StableWeightedBCEWithLogits(nn.Module):
             inputs,
             targets,
             pos_weight=self.pos_weight,
-            reduction="mean",
+            reduction=self.reduction,
         )
