@@ -56,20 +56,6 @@ pip install pytest torch
 pytest test/test_stable_bce.py -v
 ```
 
----
-
-## PR submission steps
-
-1. Fork and clone `pytorch/pytorch`
-2. `git checkout -b add-stable-bce`
-3. Copy class from `torch/nn/modules/stable_bce.py` into `torch/nn/modules/loss.py`
-4. Copy tests into `test/test_nn.py` or new file
-5. Export class in `torch/nn/modules/__init__.py` and `torch/nn/__init__.py`
-6. Run `lintrunner` or `black .`
-7. `git commit -m "Add StableWeightedBCEWithLogits with label smoothing"`
-8. Push and open PR at https://github.com/pytorch/pytorch/pulls
-
----
 
 ## PR template
 
